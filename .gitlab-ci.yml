@@ -1,0 +1,86 @@
+      
+variables:
+  REGISTRY : $CI_REGISTRY_IMAGE 
+  VERSION_DEV  : $CI_COMMIT_SHORT_SHA-dev
+  VERSION_PROD  : $CI_COMMIT_SHORT_SHA-prod  
+
+
+stages :
+  - push_registry_dev
+  - update_manifests_dev
+
+
+
+  
+build_image_dev:
+  stage: push_registry_dev
+  image : docker:24.0.6
+  services:
+    - docker:24.0.6-dind
+  variables: 
+    DOCKER_HOST: tcp://docker:2375/
+    DOCKER_DRIVER: overlay2
+    DOCKER_TLS_CERTDIR: ""
+  before_script:
+    - echo -n $CI_JOB_TOKEN | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
+  script:
+    - docker build . --target cli          --tag $REGISTRY/cli:$VERSION_DEV 
+    - docker build . --target cron         --tag $REGISTRY/cron:$VERSION_DEV 
+    - docker build . --target fpm_server   --tag $REGISTRY/fpm_server:$VERSION_DEV 
+    - docker build . --target web_server   --tag $REGISTRY/web_server:$VERSION_DEV 
+
+    - docker push $REGISTRY/cli:$VERSION_DEV
+    - docker push $REGISTRY/cron:$VERSION_DEV
+    - docker push $REGISTRY/fpm_server:$VERSION_DEV
+    - docker push $REGISTRY/web_server:$VERSION_DEV
+
+  only:
+    - develop
+  tags :
+    - gitlab-org-docker
+ 
+
+
+update_manifest_dev:
+  stage: update_manifests_dev
+  variables:
+    GIT_STRATEGY: none
+  retry: 2
+  image: docker:24.0.6
+  services:
+    - docker:24.0.6-dind
+  script:
+    # Add SSH key to root
+    - mkdir -p /root/.ssh
+    - cat "${GIT_SSH}" > /root/.ssh/id_rsa
+    - ssh-keyscan -H gitlab.com > /root/.ssh/known_hosts
+    - chmod 400 /root/.ssh/id_rsa
+    - apk add --no-cache git 
+    - export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_rsa"
+    - git config --global user.name "hatemBT"
+    - git config --global user.email "hatemtayeb2@gmail.com"
+    - git clone --single-branch --branch main git@gitlab.com:MbakopLLC/k8s-manifests.git
+    - cd k8s-manifests/development/casttypes-v2/backend-api
+    - chmod -R 777 ${PWD}
+    # Update cron image
+    - export REPO=$REGISTRY/cron:$VERSION_DEV
+    - docker run --rm -v ${PWD}:/workdir -e REPO=$REPO mikefarah/yq:4.12.2  e '.spec.template.spec.containers[0].image=env(REPO)' --inplace cron-deployment.yml
+    # Update cli image
+    - export REPO=$REGISTRY/cli:$VERSION_DEV
+    - docker run --rm -v ${PWD}:/workdir -e REPO=$REPO mikefarah/yq:4.12.2  e '.spec.template.spec.containers[0].image=env(REPO)' --inplace default-worker-deployment.yml
+    - docker run --rm -v ${PWD}:/workdir -e REPO=$REPO mikefarah/yq:4.12.2  e '.spec.template.spec.initContainers[0].image=env(REPO)' --inplace fpm-deployment.yml
+    # Update fpm image
+    - export REPO=$REGISTRY/fpm_server:$VERSION_DEV
+    - docker run --rm -v ${PWD}:/workdir -e REPO=$REPO mikefarah/yq:4.12.2  e '.spec.template.spec.containers[0].image=env(REPO)' --inplace fpm-deployment.yml
+    # Update web-server image
+    - export REPO=$REGISTRY/web_server:$VERSION_DEV
+    - docker run --rm -v ${PWD}:/workdir -e REPO=$REPO mikefarah/yq:4.12.2  e '.spec.template.spec.containers[0].image=env(REPO)' --inplace webserver-deployment.yml
+
+    - git commit -am "New version updated ${VERSION_DEV}-dev" && git push origin main
+  tags: 
+    - gitlab-org-docker
+  only:
+    refs:
+    - develop
+  tags :
+    - gitlab-org-docker
